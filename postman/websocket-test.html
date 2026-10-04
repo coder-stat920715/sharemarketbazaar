@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ShareMarketBazaar – STOMP WebSocket Tester</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 12px; }
+  fieldset { margin-bottom: 12px; }
+  button { margin: 2px; padding: 6px 10px; }
+  #log { background: #111; color: #cfc; padding: 10px; height: 340px; overflow: auto; font: 12px/1.4 monospace; white-space: pre-wrap; }
+  .err { color: #f88; } .in { color: #8cf; } .out { color: #fc8; }
+  #status { font-weight: bold; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/sockjs-client@1.6.1/dist/sockjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+</head>
+<body>
+<h2>ShareMarketBazaar – STOMP tester</h2>
+<fieldset>
+  <legend>Connection</legend>
+  Server <input id="server" value="http://localhost:8080/ws" size="32">
+  Symbol <input id="symbol" value="TCS" size="10">
+  <button onclick="connect()">Connect</button>
+  <button onclick="disconnect()">Disconnect</button>
+  <span id="status">disconnected</span>
+</fieldset>
+<fieldset>
+  <legend>Subscribe (server → client)</legend>
+  <button onclick="sub('/topic/signals')">All signals</button>
+  <button onclick="sub('/topic/signals/'+sym())">Signals for symbol</button>
+  <button onclick="sub('/topic/prices/'+sym())">Live prices for symbol</button>
+  <button onclick="sub('/app/signals/latest/'+sym())">Latest signal snapshot</button>
+  <button onclick="sub('/user/queue/analysis')">My analysis replies</button>
+  <button onclick="sub('/user/queue/errors')">My errors</button>
+</fieldset>
+<fieldset>
+  <legend>Send (client → server)</legend>
+  <button onclick="send('/app/analysis/'+sym())">Request full analysis for symbol</button>
+</fieldset>
+<button onclick="document.getElementById('log').textContent=''">Clear log</button>
+<div id="log"></div>
+
+<script>
+let client = null;
+const subs = {};
+const $ = id => document.getElementById(id);
+const sym = () => $('symbol').value.trim().toUpperCase();
+function log(cls, msg) {
+  const d = $('log'); const s = document.createElement('div');
+  s.className = cls; s.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  d.appendChild(s); d.scrollTop = d.scrollHeight;
+}
+function connect() {
+  if (client && client.active) return;
+  client = new StompJs.Client({
+    webSocketFactory: () => new SockJS($('server').value),
+    reconnectDelay: 0,
+    onConnect: () => { $('status').textContent = 'connected'; log('in', 'CONNECTED'); },
+    onStompError: f => log('err', 'STOMP error: ' + f.headers['message']),
+    onWebSocketClose: () => { $('status').textContent = 'disconnected'; log('err', 'socket closed'); }
+  });
+  client.activate();
+}
+function disconnect() { if (client) client.deactivate(); }
+function sub(dest) {
+  if (!client || !client.connected) return log('err', 'Connect first');
+  if (subs[dest]) return log('err', 'Already subscribed to ' + dest);
+  subs[dest] = client.subscribe(dest, m => log('in', '← ' + dest + '\n' + JSON.stringify(JSON.parse(m.body), null, 2)));
+  log('out', 'SUBSCRIBED ' + dest);
+}
+function send(dest) {
+  if (!client || !client.connected) return log('err', 'Connect first');
+  client.publish({ destination: dest, body: '' });
+  log('out', '→ SEND ' + dest);
+}
+</script>
+</body>
+</html>

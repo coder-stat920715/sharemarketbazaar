@@ -1,0 +1,2060 @@
+{
+  "info": {
+    "name": "ShareMarketBazaar API",
+    "description": "End-to-end tests for ShareMarketBazaar.\n\n1. Start the app (`mvn spring-boot:run`).\n2. Run folders 0\u21925 in order (Collection Runner, or one by one).\n\nSee TESTING_GUIDE.md for full details. Symbols are generated uniquely on every run, so the collection is re-runnable without restarting the app.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Derived values used by the Orders folder. Computed from {{lastPrice}} (set in folder 3).",
+          "const lp = parseFloat(pm.collectionVariables.get('lastPrice'));",
+          "if (!isNaN(lp)) {",
+          "  const f = (x) => x.toFixed(2);",
+          "  pm.collectionVariables.set('stopLossBuy',   f(lp * 0.985));       // 1.5% below",
+          "  pm.collectionVariables.set('stopTooWide',   f(lp * 0.80));        // 20% below  (> 10% max)",
+          "  pm.collectionVariables.set('stopAbovePrice',f(lp * 1.02));        // invalid for BUY",
+          "  const limitBuy = lp - 5;",
+          "  pm.collectionVariables.set('limitBuy',      f(limitBuy));         // below market -> rests as PENDING",
+          "  pm.collectionVariables.set('limitBuyStop',  f(limitBuy * 0.985));",
+          "  pm.collectionVariables.set('fillTickPrice', f(lp - 6));           // at/below limitBuy -> triggers fill",
+          "  const limitFar = lp * 0.9;",
+          "  pm.collectionVariables.set('limitFar',      f(limitFar));",
+          "  pm.collectionVariables.set('limitFarStop',  f(limitFar * 0.985));",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "userId",
+      "value": "demo-user"
+    },
+    {
+      "key": "lastPrice",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Setup & Health",
+      "description": "Confirm the application is up before testing.",
+      "item": [
+        {
+          "name": "0.1 Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "**Goal:** verify the app is running on `{{baseUrl}}`.\n\n**Expect:** 200 and `{\"status\":\"UP\"}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status is UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Market Data Ingestion",
+      "description": "Tick ingestion via REST (same code path as the Kafka consumer).",
+      "item": [
+        {
+          "name": "1.1 Ingest a valid tick",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "Send a lower-case symbol with no timestamp.\n\n**Expect:** 202 Accepted, `symbol` normalised to `TCS`, `timestamp` auto-populated.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"symbol\": \"tcs\",\n  \"price\": 3500.25,\n  \"volume\": 1200\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));",
+                  "const j = pm.response.json();",
+                  "pm.test('symbol is trimmed and upper-cased', () => pm.expect(j.symbol).to.eql('TCS'));",
+                  "pm.test('server filled in the timestamp', () => pm.expect(j.timestamp).to.be.a('string'));",
+                  "pm.test('price echoed back', () => pm.expect(j.price).to.eql(3500.25));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.2 Reject negative price",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "Bean validation (`@Positive`) must reject the tick.\n\n**Expect:** 400 Bad Request.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"symbol\": \"TCS\",\n  \"price\": -5,\n  \"volume\": 100\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('message mentions price', () => pm.expect(pm.response.json().detail).to.include('price'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.3 Reject missing symbol",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "**Expect:** 400 (`symbol is required`).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"price\": 100,\n  \"volume\": 100\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('message mentions symbol', () => pm.expect(pm.response.json().detail).to.include('symbol'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.4 Reject malformed JSON",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "**Expect:** 400 from the `HttpMessageNotReadableException` handler.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"symbol\": \"TCS\", \"price\": ",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Indicator Verification (deterministic maths)",
+      "description": "Small hand-checkable data sets proving each indicator and the per-ticker Factory config. Run each pair top-to-bottom.",
+      "item": [
+        {
+          "name": "2.1 Load VWAP data (2 ticks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "Pre-request script sends tick #1 (price 100, volume 100) to a fresh unique symbol; this request sends tick #2 (110, volume 300).\n\nVWAP = (100*100 + 110*300) / 400 = **107.5**.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"symbol\":\"{{vwapSymbol}}\",\"price\":110,\"volume\":300}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "const symbol = 'VW' + Date.now().toString().slice(-7);   // unique per run",
+                  "pm.collectionVariables.set('vwapSymbol', symbol);",
+                  "const ticks = [[100, 100]];   // [price, volume]",
+                  "function sendTick(i) {",
+                  "  if (i >= ticks.length) return;",
+                  "  pm.sendRequest({",
+                  "    url: base + '/api/v1/ticks', method: 'POST',",
+                  "    header: { 'Content-Type': 'application/json' },",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ symbol: symbol, price: ticks[i][0], volume: ticks[i][1] }) }",
+                  "  }, function (err, res) {",
+                  "    if (err || res.code !== 202) console.error('Tick ' + i + ' failed', err || res.text());",
+                  "    sendTick(i + 1);",
+                  "  });",
+                  "}",
+                  "sendTick(0);",
+                  "console.log('Pre-loading ' + ticks.length + ' ticks for ' + symbol);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.2 Verify VWAP = 107.5",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{vwapSymbol}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{vwapSymbol}}"
+              ]
+            },
+            "description": "**Expect:** `vwap` 107.5, `tickCount` 2, no EMA/RSI yet (they need 27 / 15 ticks), signal HOLD with reason *Warming up*."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('tickCount is 2', () => pm.expect(j.tickCount).to.eql(2));",
+                  "pm.test('VWAP is 107.5', () => pm.expect(j.vwap).to.eql(107.5));",
+                  "pm.test('last price is 110', () => pm.expect(j.lastPrice).to.eql(110));",
+                  "pm.test('EMA/RSI absent while warming up', () => {",
+                  "  pm.expect(j.ema12).to.be.undefined; pm.expect(j.rsi14).to.be.undefined;",
+                  "});",
+                  "pm.test('only VWAP computed', () => pm.expect(Object.keys(j.indicators)).to.have.members(['VWAP']));",
+                  "pm.test('signal is HOLD (warming up)', () => {",
+                  "  pm.expect(j.signal.signal).to.eql('HOLD');",
+                  "  pm.expect(j.signal.reason).to.include('Warming up');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.3 Load RSI data (16 steadily rising ticks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "15 ticks (100..114) are sent by the pre-request script, this request sends the 16th (115). Prices only go up, so average loss = 0 and **RSI = 100**.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"symbol\":\"{{rsiSymbol}}\",\"price\":115,\"volume\":100}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "const symbol = 'RS' + Date.now().toString().slice(-7);   // unique per run",
+                  "pm.collectionVariables.set('rsiSymbol', symbol);",
+                  "const ticks = [[100, 100], [101, 100], [102, 100], [103, 100], [104, 100], [105, 100], [106, 100], [107, 100], [108, 100], [109, 100], [110, 100], [111, 100], [112, 100], [113, 100], [114, 100]];   // [price, volume]",
+                  "function sendTick(i) {",
+                  "  if (i >= ticks.length) return;",
+                  "  pm.sendRequest({",
+                  "    url: base + '/api/v1/ticks', method: 'POST',",
+                  "    header: { 'Content-Type': 'application/json' },",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ symbol: symbol, price: ticks[i][0], volume: ticks[i][1] }) }",
+                  "  }, function (err, res) {",
+                  "    if (err || res.code !== 202) console.error('Tick ' + i + ' failed', err || res.text());",
+                  "    sendTick(i + 1);",
+                  "  });",
+                  "}",
+                  "sendTick(0);",
+                  "console.log('Pre-loading ' + ticks.length + ' ticks for ' + symbol);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.4 Verify RSI = 100",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{rsiSymbol}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{rsiSymbol}}"
+              ]
+            },
+            "description": "**Expect:** `rsi14` = 100, RSI bias `BEARISH` (overbought), EMA still absent."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('tickCount is 16', () => pm.expect(j.tickCount).to.eql(16));",
+                  "pm.test('RSI is 100', () => pm.expect(j.rsi14).to.eql(100));",
+                  "pm.test('RSI bias is BEARISH (overbought)', () => pm.expect(j.indicators.RSI.bias).to.eql('BEARISH'));",
+                  "pm.test('EMA still absent (needs 27 ticks)', () => pm.expect(j.ema12).to.be.undefined);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.5 Per-ticker config: RELIANCE has no VWAP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "`application.yml` overrides RELIANCE to `[EMA_CROSSOVER, RSI]`. The **Factory** therefore never builds the VWAP strategy for it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"symbol\": \"RELIANCE\",\n  \"price\": 2900,\n  \"volume\": 500\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.6 Verify RELIANCE indicator set",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/RELIANCE",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "RELIANCE"
+              ]
+            },
+            "description": "**Expect:** no `vwap` field and no `VWAP` entry in `indicators` (Factory pattern in action). Compare with 2.2 where VWAP is present."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('VWAP is not computed for RELIANCE', () => {",
+                  "  pm.expect(j.vwap).to.be.undefined;",
+                  "  pm.expect(j.indicators.VWAP).to.be.undefined;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Signal Generation (EMA crossover + RSI guard)",
+      "description": "Three scenarios: BUY, SELL, and a crossover blocked by the RSI guard. Each 'Load' request pre-sends the earlier ticks, then sends the final tick that creates the crossover.",
+      "item": [
+        {
+          "name": "3.1 Load BUY scenario (46 ticks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "Prices fall 0.5/tick for 30 ticks (EMA12 < EMA26) then rise 0.5/tick. The final tick (**992.5**) makes EMA12 cross above EMA26 while RSI stays below 70.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"symbol\": \"{{buySymbol}}\", \"price\": 992.5, \"volume\": 1000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "const symbol = 'BUY' + Date.now().toString().slice(-7);   // unique per run",
+                  "pm.collectionVariables.set('buySymbol', symbol);",
+                  "const ticks = [[1000, 1000], [999.5, 1000], [999.0, 1000], [998.5, 1000], [998.0, 1000], [997.5, 1000], [997.0, 1000], [996.5, 1000], [996.0, 1000], [995.5, 1000], [995.0, 1000], [994.5, 1000], [994.0, 1000], [993.5, 1000], [993.0, 1000], [992.5, 1000], [992.0, 1000], [991.5, 1000], [991.0, 1000], [990.5, 1000], [990.0, 1000], [989.5, 1000], [989.0, 1000], [988.5, 1000], [988.0, 1000], [987.5, 1000], [987.0, 1000], [986.5, 1000], [986.0, 1000], [985.5, 1000], [985.0, 1000], [985.5, 1000], [986.0, 1000], [986.5, 1000], [987.0, 1000], [987.5, 1000], [988.0, 1000], [988.5, 1000], [989.0, 1000], [989.5, 1000], [990.0, 1000], [990.5, 1000], [991.0, 1000], [991.5, 1000], [992.0, 1000]];   // [price, volume]",
+                  "function sendTick(i) {",
+                  "  if (i >= ticks.length) return;",
+                  "  pm.sendRequest({",
+                  "    url: base + '/api/v1/ticks', method: 'POST',",
+                  "    header: { 'Content-Type': 'application/json' },",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ symbol: symbol, price: ticks[i][0], volume: ticks[i][1] }) }",
+                  "  }, function (err, res) {",
+                  "    if (err || res.code !== 202) console.error('Tick ' + i + ' failed', err || res.text());",
+                  "    sendTick(i + 1);",
+                  "  });",
+                  "}",
+                  "sendTick(0);",
+                  "console.log('Pre-loading ' + ticks.length + ' ticks for ' + symbol);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.2 Verify BUY signal",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{buySymbol}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{buySymbol}}"
+              ]
+            },
+            "description": "**Expect:** signal `BUY`, `rsi14` \u2248 67.1, `stopLoss` \u2248 977.6125, `targetPrice` \u2248 1022.275. Saves `lastPrice` for the Orders folder."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));const near = (a, b, tol=0.02) => Math.abs(a - b) <= tol;",
+                  "const j = pm.response.json();",
+                  "pm.test('tickCount is 46', () => pm.expect(j.tickCount).to.eql(46));",
+                  "pm.test('EMA12 above EMA26', () => pm.expect(j.ema12).to.be.above(j.ema26));",
+                  "pm.test('RSI below overbought (70)', () => pm.expect(j.rsi14).to.be.below(70));",
+                  "pm.test('golden cross flagged on latest tick', () => pm.expect(j.indicators.EMA_CROSSOVER.values.crossover).to.eql(1));",
+                  "pm.test('signal is BUY', () => pm.expect(j.signal.signal).to.eql('BUY'));",
+                  "pm.test('confidence between 0.55 and 1', () => pm.expect(j.signal.confidence).to.be.within(0.55, 1));",
+                  "pm.test('stop-loss = price - 1.5%', () => pm.expect(near(j.signal.stopLoss, j.lastPrice * 0.985)).to.be.true);",
+                  "pm.test('target = price + 3%', () => pm.expect(near(j.signal.targetPrice, j.lastPrice * 1.03)).to.be.true);",
+                  "pm.collectionVariables.set('lastPrice', j.lastPrice);   // used by the Orders folder",
+                  "console.log('lastPrice saved:', j.lastPrice);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.3 BUY signal was persisted",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{buySymbol}}/signals",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{buySymbol}}",
+                "signals"
+              ]
+            },
+            "description": "Only actionable signals (BUY/SELL) are stored; HOLD is not. **Expect:** exactly one BUY."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const arr = pm.response.json();",
+                  "pm.test('exactly one persisted signal', () => pm.expect(arr.length).to.eql(1));",
+                  "pm.test('it is a BUY', () => pm.expect(arr[0].signal).to.eql('BUY'));",
+                  "pm.test('reason explains the cross', () => pm.expect(arr[0].reason).to.include('crossed above'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.4 Load SELL scenario (46 ticks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "Mirror image: prices rise then fall. Final tick (**1007.5**) creates a death cross with RSI above 30.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"symbol\": \"{{sellSymbol}}\", \"price\": 1007.5, \"volume\": 1000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "const symbol = 'SELL' + Date.now().toString().slice(-7);   // unique per run",
+                  "pm.collectionVariables.set('sellSymbol', symbol);",
+                  "const ticks = [[1000, 1000], [1000.5, 1000], [1001.0, 1000], [1001.5, 1000], [1002.0, 1000], [1002.5, 1000], [1003.0, 1000], [1003.5, 1000], [1004.0, 1000], [1004.5, 1000], [1005.0, 1000], [1005.5, 1000], [1006.0, 1000], [1006.5, 1000], [1007.0, 1000], [1007.5, 1000], [1008.0, 1000], [1008.5, 1000], [1009.0, 1000], [1009.5, 1000], [1010.0, 1000], [1010.5, 1000], [1011.0, 1000], [1011.5, 1000], [1012.0, 1000], [1012.5, 1000], [1013.0, 1000], [1013.5, 1000], [1014.0, 1000], [1014.5, 1000], [1015.0, 1000], [1014.5, 1000], [1014.0, 1000], [1013.5, 1000], [1013.0, 1000], [1012.5, 1000], [1012.0, 1000], [1011.5, 1000], [1011.0, 1000], [1010.5, 1000], [1010.0, 1000], [1009.5, 1000], [1009.0, 1000], [1008.5, 1000], [1008.0, 1000]];   // [price, volume]",
+                  "function sendTick(i) {",
+                  "  if (i >= ticks.length) return;",
+                  "  pm.sendRequest({",
+                  "    url: base + '/api/v1/ticks', method: 'POST',",
+                  "    header: { 'Content-Type': 'application/json' },",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ symbol: symbol, price: ticks[i][0], volume: ticks[i][1] }) }",
+                  "  }, function (err, res) {",
+                  "    if (err || res.code !== 202) console.error('Tick ' + i + ' failed', err || res.text());",
+                  "    sendTick(i + 1);",
+                  "  });",
+                  "}",
+                  "sendTick(0);",
+                  "console.log('Pre-loading ' + ticks.length + ' ticks for ' + symbol);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.5 Verify SELL signal",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{sellSymbol}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{sellSymbol}}"
+              ]
+            },
+            "description": "**Expect:** `SELL`, `rsi14` \u2248 32.9, stop-loss above price (+1.5%), target below (-3%)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));const near = (a, b, tol=0.02) => Math.abs(a - b) <= tol;",
+                  "const j = pm.response.json();",
+                  "pm.test('EMA12 below EMA26', () => pm.expect(j.ema12).to.be.below(j.ema26));",
+                  "pm.test('RSI above oversold (30)', () => pm.expect(j.rsi14).to.be.above(30));",
+                  "pm.test('death cross flagged', () => pm.expect(j.indicators.EMA_CROSSOVER.values.crossover).to.eql(-1));",
+                  "pm.test('signal is SELL', () => pm.expect(j.signal.signal).to.eql('SELL'));",
+                  "pm.test('stop-loss = price + 1.5%', () => pm.expect(near(j.signal.stopLoss, j.lastPrice * 1.015)).to.be.true);",
+                  "pm.test('target = price - 3%', () => pm.expect(near(j.signal.targetPrice, j.lastPrice * 0.97)).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.6 Load RSI-guard scenario (40 ticks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "Same shape as BUY, but the rebound is steep (+1.5/tick) so RSI ends above 70 (73.99) at the moment of the golden cross.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"symbol\": \"{{guardSymbol}}\", \"price\": 998.5, \"volume\": 1000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "const symbol = 'GRD' + Date.now().toString().slice(-7);   // unique per run",
+                  "pm.collectionVariables.set('guardSymbol', symbol);",
+                  "const ticks = [[1000, 1000], [999.5, 1000], [999.0, 1000], [998.5, 1000], [998.0, 1000], [997.5, 1000], [997.0, 1000], [996.5, 1000], [996.0, 1000], [995.5, 1000], [995.0, 1000], [994.5, 1000], [994.0, 1000], [993.5, 1000], [993.0, 1000], [992.5, 1000], [992.0, 1000], [991.5, 1000], [991.0, 1000], [990.5, 1000], [990.0, 1000], [989.5, 1000], [989.0, 1000], [988.5, 1000], [988.0, 1000], [987.5, 1000], [987.0, 1000], [986.5, 1000], [986.0, 1000], [985.5, 1000], [985.0, 1000], [986.5, 1000], [988.0, 1000], [989.5, 1000], [991.0, 1000], [992.5, 1000], [994.0, 1000], [995.5, 1000], [997.0, 1000]];   // [price, volume]",
+                  "function sendTick(i) {",
+                  "  if (i >= ticks.length) return;",
+                  "  pm.sendRequest({",
+                  "    url: base + '/api/v1/ticks', method: 'POST',",
+                  "    header: { 'Content-Type': 'application/json' },",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ symbol: symbol, price: ticks[i][0], volume: ticks[i][1] }) }",
+                  "  }, function (err, res) {",
+                  "    if (err || res.code !== 202) console.error('Tick ' + i + ' failed', err || res.text());",
+                  "    sendTick(i + 1);",
+                  "  });",
+                  "}",
+                  "sendTick(0);",
+                  "console.log('Pre-loading ' + ticks.length + ' ticks for ' + symbol);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.7 Verify crossover blocked by RSI guard",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{guardSymbol}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{guardSymbol}}"
+              ]
+            },
+            "description": "**Expect:** crossover = 1 but signal is **HOLD** with reason *Bullish EMA cross blocked by RSI guard*."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('golden cross did occur', () => pm.expect(j.indicators.EMA_CROSSOVER.values.crossover).to.eql(1));",
+                  "pm.test('RSI is overbought', () => pm.expect(j.rsi14).to.be.at.least(70));",
+                  "pm.test('signal downgraded to HOLD', () => pm.expect(j.signal.signal).to.eql('HOLD'));",
+                  "pm.test('reason cites the RSI guard', () => pm.expect(j.signal.reason).to.include('blocked by RSI guard'));",
+                  "pm.test('no stop-loss/target on HOLD', () => {",
+                  "  pm.expect(j.signal.stopLoss).to.be.undefined; pm.expect(j.signal.targetPrice).to.be.undefined;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.8 No HOLD signals persisted",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{guardSymbol}}/signals",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{guardSymbol}}",
+                "signals"
+              ]
+            },
+            "description": "**Expect:** `[]` \u2014 HOLD signals are never persisted (unless `emit-hold` streaming is enabled, which only affects WebSocket, not the DB)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('empty list', () => pm.expect(pm.response.json()).to.eql([]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Orders, Risk Engine & OMS",
+      "description": "Requires folder 3 (uses {{buySymbol}} and {{lastPrice}}). Run top to bottom. Demo account: `demo-user`, balance 1,000,000.",
+      "item": [
+        {
+          "name": "4.1 Market BUY 10 shares (EXECUTED)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "No `limitPrice` = market order. Risk checks pass (balance, size, stop-loss 1.5% below). **Expect:** 201, `EXECUTED`, `executionPrice` = last tick.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 10,\n  \"stopLoss\": {{stopLossBuy}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.test('status EXECUTED', () => pm.expect(j.status).to.eql('EXECUTED'));",
+                  "pm.test('filled at last market price', () => pm.expect(j.executionPrice).to.eql(parseFloat(pm.collectionVariables.get('lastPrice'))));",
+                  "pm.test('id assigned', () => pm.expect(j.id).to.be.a('number'));",
+                  "pm.collectionVariables.set('orderId', j.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.2 Get order by id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/{{orderId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "{{orderId}}"
+              ]
+            },
+            "description": "**Expect:** the order saved in 4.1."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('EXECUTED', () => pm.expect(pm.response.json().status).to.eql('EXECUTED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.3 List orders for user",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders?userId={{userId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}"
+                }
+              ]
+            },
+            "description": "**Expect:** newest-first list that includes the order from 4.1."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const arr = pm.response.json();",
+                  "pm.test('contains our order', () => pm.expect(arr.map(o => o.id)).to.include(parseInt(pm.collectionVariables.get('orderId'))));",
+                  "pm.test('newest first', () => { for (let i = 1; i < arr.length; i++) pm.expect(arr[i-1].createdAt >= arr[i].createdAt).to.be.true; });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.4 Risk reject: BUY without stop-loss",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "**Expect:** 422 with the persisted order `REJECTED`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422', () => pm.response.to.have.status(422));",
+                  "const j = pm.response.json();",
+                  "pm.test('status is REJECTED', () => pm.expect(j.status).to.eql('REJECTED'));",
+                  "pm.test('reason contains \"Stop-loss is mandatory\"', () => pm.expect(j.rejectionReason).to.include('Stop-loss is mandatory'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.5 Risk reject: stop-loss too far (20%)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Allowed stop-loss distance is 0.1%\u201310%. **Expect:** 422.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 10,\n  \"stopLoss\": {{stopTooWide}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422', () => pm.response.to.have.status(422));",
+                  "const j = pm.response.json();",
+                  "pm.test('status is REJECTED', () => pm.expect(j.status).to.eql('REJECTED'));",
+                  "pm.test('reason contains \"outside allowed range\"', () => pm.expect(j.rejectionReason).to.include('outside allowed range'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.6 Risk reject: stop-loss above price",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "**Expect:** 422.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 10,\n  \"stopLoss\": {{stopAbovePrice}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422', () => pm.response.to.have.status(422));",
+                  "const j = pm.response.json();",
+                  "pm.test('status is REJECTED', () => pm.expect(j.status).to.eql('REJECTED'));",
+                  "pm.test('reason contains \"must be below the order price\"', () => pm.expect(j.rejectionReason).to.include('must be below the order price'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.7 Risk reject: order value too large",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "1000 \u00d7 ~992 \u2248 992,500 > 500,000 limit. **Expect:** 422.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 1000,\n  \"stopLoss\": {{stopLossBuy}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422', () => pm.response.to.have.status(422));",
+                  "const j = pm.response.json();",
+                  "pm.test('status is REJECTED', () => pm.expect(j.status).to.eql('REJECTED'));",
+                  "pm.test('reason contains \"exceeds max order value\"', () => pm.expect(j.rejectionReason).to.include('exceeds max order value'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.8 Risk reject: position limit",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Max position is 5000 shares. All violations are listed together in `rejectionReason`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 5001,\n  \"stopLoss\": {{stopLossBuy}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422', () => pm.response.to.have.status(422));",
+                  "const j = pm.response.json();",
+                  "pm.test('status is REJECTED', () => pm.expect(j.status).to.eql('REJECTED'));",
+                  "pm.test('reason contains \"Position limit exceeded\"', () => pm.expect(j.rejectionReason).to.include('Position limit exceeded'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.9 Risk reject: SELL more than held",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "We hold 10 shares; short selling is not permitted. **Expect:** 422.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"SELL\",\n  \"quantity\": 500\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422', () => pm.response.to.have.status(422));",
+                  "const j = pm.response.json();",
+                  "pm.test('status is REJECTED', () => pm.expect(j.status).to.eql('REJECTED'));",
+                  "pm.test('reason contains \"Insufficient position\"', () => pm.expect(j.rejectionReason).to.include('Insufficient position'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.10 Risk reject: unknown account",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "**Expect:** 422.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"ghost\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 10,\n  \"stopLoss\": {{stopLossBuy}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422', () => pm.response.to.have.status(422));",
+                  "const j = pm.response.json();",
+                  "pm.test('status is REJECTED', () => pm.expect(j.status).to.eql('REJECTED'));",
+                  "pm.test('reason contains \"Unknown account\"', () => pm.expect(j.rejectionReason).to.include('Unknown account'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.11 Validation error: quantity 0 & missing type",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Fails controller-level `@Valid` before reaching the OMS. **Expect:** 400 with per-field `errors`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"quantity\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));",
+                  "const j = pm.response.json();",
+                  "pm.test('detail is Validation failed', () => pm.expect(j.detail).to.eql('Validation failed'));",
+                  "pm.test('quantity error reported', () => pm.expect(j.errors.quantity).to.be.a('string'));",
+                  "pm.test('type error reported', () => pm.expect(j.errors.type).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.12 Market SELL 4 shares (partial exit)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Holding 10, selling 4 \u2192 6 left. **Expect:** 201 `EXECUTED`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"SELL\",\n  \"quantity\": 4\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('EXECUTED', () => pm.expect(pm.response.json().status).to.eql('EXECUTED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.13 Limit BUY below market (stays PENDING)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Limit = lastPrice \u2212 5. Market is above it, so the order rests. **Expect:** 201 `PENDING`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 10,\n  \"limitPrice\": {{limitBuy}},\n  \"stopLoss\": {{limitBuyStop}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.test('PENDING (limit below market)', () => pm.expect(j.status).to.eql('PENDING'));",
+                  "pm.test('no execution price yet', () => pm.expect(j.executionPrice).to.be.undefined);",
+                  "pm.collectionVariables.set('pendingOrderId', j.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.14 Trigger fill: tick at/below the limit",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ticks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ticks"
+              ]
+            },
+            "description": "A tick at lastPrice \u2212 6 is \u2264 limit. The OMS `TickReceivedEvent` observer re-runs risk and fills the resting order.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"symbol\":\"{{buySymbol}}\",\"price\":{{fillTickPrice}},\"volume\":500}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.15 Verify limit order was filled",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/{{pendingOrderId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "{{pendingOrderId}}"
+              ]
+            },
+            "description": "**Expect:** `EXECUTED` at the tick price (price improvement vs the limit)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('now EXECUTED', () => pm.expect(j.status).to.eql('EXECUTED'));",
+                  "pm.test('filled at the tick price', () => pm.expect(j.executionPrice).to.eql(parseFloat(pm.collectionVariables.get('fillTickPrice'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.16 Place far-away limit BUY (PENDING)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Limit = 90% of market; will not fill. We use it to test cancellation.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"{{buySymbol}}\",\n  \"type\": \"BUY\",\n  \"quantity\": 10,\n  \"limitPrice\": {{limitFar}},\n  \"stopLoss\": {{limitFarStop}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('lastPrice')) { throw new Error('Run folder 3 first (needs {{lastPrice}})'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('PENDING', () => pm.expect(pm.response.json().status).to.eql('PENDING'));",
+                  "pm.collectionVariables.set('cancelOrderId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.17 Cancel pending order",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/{{cancelOrderId}}?userId={{userId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "{{cancelOrderId}}"
+              ],
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}"
+                }
+              ]
+            },
+            "description": "**Expect:** 200 `CANCELLED`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('CANCELLED', () => pm.expect(pm.response.json().status).to.eql('CANCELLED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.18 Cancel again \u2192 conflict",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/{{cancelOrderId}}?userId={{userId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "{{cancelOrderId}}"
+              ],
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}"
+                }
+              ]
+            },
+            "description": "Only PENDING orders can be cancelled. **Expect:** 409 Conflict."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('explains why', () => pm.expect(pm.response.json().detail).to.include('Only PENDING'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.19 Cancel an EXECUTED order \u2192 conflict",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/{{orderId}}?userId={{userId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "{{orderId}}"
+              ],
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}"
+                }
+              ]
+            },
+            "description": "**Expect:** 409."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.20 Cancel with wrong user \u2192 not found",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/{{pendingOrderId}}?userId=someone-else",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "{{pendingOrderId}}"
+              ],
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "someone-else"
+                }
+              ]
+            },
+            "description": "Ownership is enforced by hiding other users' orders. **Expect:** 404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.21 Order on symbol with no market data",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Cannot price the order without a tick. **Expect:** 404.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"symbol\": \"NODATA\",\n  \"type\": \"BUY\",\n  \"quantity\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('explains no data', () => pm.expect(pm.response.json().detail).to.include('No market data'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.22 Get non-existent order",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/99999999",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "99999999"
+              ]
+            },
+            "description": "**Expect:** 404 problem response."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Error Handling",
+      "description": "",
+      "item": [
+        {
+          "name": "5.1 Analysis for unknown symbol",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/NOSUCHSYM",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "NOSUCHSYM"
+              ]
+            },
+            "description": "**Expect:** 404 `application/problem+json`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', () => pm.response.to.have.status(404));",
+                  "const j = pm.response.json();",
+                  "pm.test('RFC 7807 body', () => { pm.expect(j.status).to.eql(404); pm.expect(j.detail).to.include('NOSUCHSYM'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+# ---------------------------------------------------------------
+# Common configuration
+# Default profile = h2 (local dev, no Kafka needed).
+# Production: SPRING_PROFILES_ACTIVE=postgres
+# ---------------------------------------------------------------
+spring:
+  application:
+    name: sharemarketbazaar
+  profiles:
+    default: h2
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+  jpa:
+    open-in-view: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: sharemarketbazaar-analytics
+      auto-offset-reset: latest
+      enable-auto-commit: true
+      # ErrorHandlingDeserializer prevents a poison-pill message from blocking the partition
+      key-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.value.default.type: com.sharemarketbazaar.model.StockTick
+        spring.json.trusted.packages: com.sharemarketbazaar.model
+        spring.json.use.type.headers: false
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+sharemarket:
+  kafka:
+    topic: market.ticks
+  analysis:
+    market-zone: Asia/Kolkata          # trading day boundary for intraday VWAP reset
+    max-ticks-per-symbol: 50000
+    default-indicators: [EMA_CROSSOVER, RSI, VWAP]
+    ticker-indicators:                 # per-ticker overrides (consumed by the Factory)
+      RELIANCE: [EMA_CROSSOVER, RSI]
+  signal:
+    stop-loss-pct: 1.5
+    target-pct: 3.0
+    rsi-overbought: 70
+    rsi-oversold: 30
+    emit-hold: false                   # true = also stream HOLD signals over WebSocket
+  risk:
+    max-position-quantity: 5000
+    max-order-value: 500000
+    min-stop-loss-pct: 0.1
+    max-stop-loss-pct: 10.0
+
+---
+# ---------------------------------------------------------------
+# H2 in-memory profile (local dev / tests)
+# ---------------------------------------------------------------
+spring:
+  config:
+    activate:
+      on-profile: h2
+  datasource:
+    url: jdbc:h2:mem:sharemarket;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+
+sharemarket:
+  kafka:
+    enabled: ${KAFKA_ENABLED:false}    # no broker required locally; use POST /api/v1/ticks
+
+---
+# ---------------------------------------------------------------
+# PostgreSQL profile (production)
+# ---------------------------------------------------------------
+spring:
+  config:
+    activate:
+      on-profile: postgres
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:sharemarket}
+    driver-class-name: org.postgresql.Driver
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 20
+  jpa:
+    hibernate:
+      ddl-auto: update                 # use Flyway/Liquibase migrations + "validate" in real prod
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+sharemarket:
+  kafka:
+    enabled: ${KAFKA_ENABLED:true}
